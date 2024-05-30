@@ -1,0 +1,3 @@
+# ignore secrets
+key.json
+credentials.json
