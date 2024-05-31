@@ -9,15 +9,16 @@ from oauth2client import file as oa2file
 from oauth2client import client as oa2client
 from oauth2client import tools as oa2tools
 import common
+
 SCOPES = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 
 # declare command line parameters
-parser = argparse.ArgumentParser(description="Downloads Google Photos albums with photos, trying to use original photos from specified directory",
+parser = argparse.ArgumentParser(description="Downloads Google Photos albums trying to prevent downloading known existing files",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--originals", default=None, help="Directory with original photos")
 parser.add_argument("--trashbin", default=None, help="Directory to store photos which are no longer in album")
 parser.add_argument("--key_file", default="key.json", help="Application keys file location")
 parser.add_argument("--creds_file", default="credentials.json", help="User credentials file location")
+parser.add_argument('--skip_new', action='store_true', help="Skip new Google Photos albums downloading")
 parser.add_argument("destination", help="Destination download directory")
 args = parser.parse_args()
 
@@ -38,6 +39,8 @@ def LoadAlbums(dest):
             data=json.load(file);
             items={}
             data['path']=str(path.absolute().parent)
+            if 'downloadTime' not in data:
+                data['downloadTime']=0
             albums[data['id']]=data
     return albums
 
@@ -50,7 +53,7 @@ def LoadIgnore(dest):
     return ignore
 
 # dowload all albums
-def DowloadAlbums(req,orig,trash,dest,old,ignore):
+def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
     nextpage='0'
     new={}
     while nextpage is not None:
@@ -70,10 +73,10 @@ def DowloadAlbums(req,orig,trash,dest,old,ignore):
             nextpage=None
         # store albums' data by their last download time
         for album in data['albums']:
-            if album['id'] in old and 'downloadTime' in old[album['id']]:
+            if album['id'] in old:
                 album['path']=old[album['id']]['path']
                 new[old[album['id']]['downloadTime']] = new.get(old[album['id']]['downloadTime'], [])+[album]
-            else:
+            elif not skip_new:
                 album['path']=str(dest/album['title'])
                 new[0] = new.get(0, [])+[album]
     # download albums starting from the oldest downloaded
@@ -82,12 +85,12 @@ def DowloadAlbums(req,orig,trash,dest,old,ignore):
             # download only allowed albums
             if album['title'] not in ignore and album['id'] not in ignore:
                 if album['id'] in old:
-                    DowloadAlbum(req,orig,trash,album,old[album['id']])
+                    DowloadAlbum(req,trash,album,old[album['id']])
                 else:
-                    DowloadAlbum(req,orig,trash,album,None)
+                    DowloadAlbum(req,trash,album,None)
 
 # dowload album
-def DowloadAlbum(req,orig,trash,album,old_album):
+def DowloadAlbum(req,trash,album,old_album):
     album['mediaItems']={}
     dest=Path(album['path'])
     dest.mkdir(parents=True,exist_ok=True)
@@ -115,9 +118,9 @@ def DowloadAlbum(req,orig,trash,album,old_album):
         # download album media
         for media in items['mediaItems']:
             if old_album is not None and media['id'] in old_album['mediaItems']:
-                res=CheckMedia(req,orig,trash,album,media,old_album['mediaItems'][media['id']])
+                res=CheckMedia(req,trash,album,media,old_album['mediaItems'][media['id']])
             else:
-                res=DowloadMedia(req,orig,trash,album,media)
+                res=DowloadMedia(req,trash,album,media)
             if not res:
                 break
         # keep old album data
@@ -170,14 +173,14 @@ def DowloadAlbum(req,orig,trash,album,old_album):
     return True
 
 # check existing media
-def CheckMedia(req,orig,trash,album,media,old):
+def CheckMedia(req,trash,album,media,old):
     # fake
     if old is None or 'filename' not in old:
-        return DowloadMedia(req,orig,trash,album,media)
+        return DowloadMedia(req,trash,album,media)
     # check if exists
     oldpath=Path(album['path'],old['filename'])
     if not oldpath.exists():
-        return DowloadMedia(req,orig,trash,album,media)
+        return DowloadMedia(req,trash,album,media)
     # something changed
     if not common.compare_dict(media,old,{'baseUrl','filename'}):
         # move outdated file to trash directory
@@ -190,7 +193,7 @@ def CheckMedia(req,orig,trash,album,media,old):
             dest.unlink()
             print(album['title'],oldpath.name,'outdated file deleted')
         # download new media
-        return DowloadMedia(req,orig,trash,album,media)
+        return DowloadMedia(req,trash,album,media)
     # set old filename
     media['filename']=old['filename']
     # store media data to album
@@ -200,7 +203,7 @@ def CheckMedia(req,orig,trash,album,media,old):
     return True
 
 # dowload new media
-def DowloadMedia(req,orig,trash,album,media):
+def DowloadMedia(req,trash,album,media):
     # can we store it?
     if 'filename' not in media:
         return True
@@ -270,4 +273,4 @@ def NameClear(name,id):
 req=Authorize(Path(args.key_file),Path(args.creds_file))
 old_albums=LoadAlbums(Path(args.destination))
 ignore_albums=LoadIgnore(Path(args.destination))
-DowloadAlbums(req,Path(args.originals),Path(args.trashbin),Path(args.destination),old_albums,ignore_albums)
+DowloadAlbums(req,Path(args.trashbin),Path(args.destination),old_albums,ignore_albums,args.skip_new)
