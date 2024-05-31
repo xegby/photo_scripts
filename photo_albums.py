@@ -133,6 +133,7 @@ def DowloadAlbum(req,orig,trash,album,old_album):
         json.dump(album,file,indent=2)
     # stop here if something went wrong
     if not res:
+        print(album['title'],"is not completely synchronized")
         return False
     # build set of current album items filenames and remove any excess files from directory
     filenames={'album.json'}
@@ -153,7 +154,7 @@ def DowloadAlbum(req,orig,trash,album,old_album):
     for id,media in album['mediaItems'].items():
         filename=Path(album['path'],media['filename'])
         if filename.exists():
-            filename=common.move_file(str(filename),str(filename))
+            filename=common.move_file(str(filename),NameClear(str(filename),media['id']),False)
             if filename:
                 filename=Path(filename)
                 if media['filename']!=filename.name:
@@ -173,7 +174,7 @@ def CheckMedia(req,orig,trash,album,media,old):
     # fake
     if old is None or 'filename' not in old:
         return DowloadMedia(req,orig,trash,album,media)
-    # check is exists
+    # check if exists
     oldpath=Path(album['path'],old['filename'])
     if not oldpath.exists():
         return DowloadMedia(req,orig,trash,album,media)
@@ -182,7 +183,7 @@ def CheckMedia(req,orig,trash,album,media,old):
         # move outdated file to trash directory
         moved=None
         if trash is not None:
-            moved=common.move_file(str(oldpath),str(trash/album['title']/old['filename']))
+            moved=common.move_file(str(oldpath),str(trash/album['title']/NameClear(old['filename'],old['id'])))
         if moved:
             print(album['title'],oldpath.name,'outdated file moved to trash directory')
         else:
@@ -203,8 +204,21 @@ def DowloadMedia(req,orig,trash,album,media):
     # can we store it?
     if 'filename' not in media:
         return True
-    # format temp destination
+    # format destination
     dest=Path(album['path'],media['filename'])
+    if dest.exists():
+        dest=Path(NameExtend(str(dest),media['id']))
+        if dest.exists():
+            # move outdated file to trash directory
+            moved=None
+            if trash is not None:
+                moved=common.move_file(str(dest),str(trash/album['title']/media['filename']))
+            if moved:
+                print(album['title'],dest.name,'outdated file moved to trash directory')
+            else:
+                dest.unlink()
+                print(album['title'],dest.name,'outdated file deleted')
+    # format temp filename
     tmp=dest.parent/(dest.name+'.tmp')
     # file already exists
     if tmp.exists():
@@ -238,6 +252,19 @@ def DowloadMedia(req,orig,trash,album,media):
     album['mediaItems'][media['id']]=media
     print(album['title'],media['filename'],'downloaded')
     return True
+
+# extend filename with id <original name>_<id last 8 chars>.<original extension>
+def NameExtend(name,id):
+    path=Path(name)
+    return str(Path(path.parent)/(path.stem+'_'+id[-8:]+path.suffix))
+
+# remove id from filename
+def NameClear(name,id):
+    path=Path(name)
+    # cut off id if its known
+    if id and path.stem.endswith('_'+id[-8:]):
+        return str(Path(path.parent)/(path.stem[:-9]+path.suffix))
+    return name
 
 # main flow
 req=Authorize(Path(args.key_file),Path(args.creds_file))
