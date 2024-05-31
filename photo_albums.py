@@ -42,6 +42,7 @@ def LoadAlbums(dest):
             if 'downloadTime' not in data:
                 data['downloadTime']=0
             albums[data['id']]=data
+    print('local albums in',dest,':',len(albums))
     return albums
 
 # load ignore list
@@ -54,6 +55,8 @@ def LoadIgnore(dest):
 
 # dowload all albums
 def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
+    num_new=0
+    num_local=0
     nextpage='0'
     new={}
     while nextpage is not None:
@@ -76,9 +79,13 @@ def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
             if album['id'] in old:
                 album['path']=old[album['id']]['path']
                 new[old[album['id']]['downloadTime']] = new.get(old[album['id']]['downloadTime'], [])+[album]
-            elif not skip_new:
-                album['path']=str(dest/album['title'])
-                new[0] = new.get(0, [])+[album]
+                num_local+=1
+            else:
+                if not skip_new:
+                    album['path']=str(dest/album['title'])
+                    new[0] = new.get(0, [])+[album]
+                num_new+=1
+    print(f'Google Photos albums: {num_new+num_local} ({num_local} local, {num_new} new)%s' %(', new albums will be skipped' if skip_new else ''))
     # download albums starting from the oldest downloaded
     for k,albums in sorted(new.items()):
         for album in albums:
@@ -91,7 +98,9 @@ def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
 
 # dowload album
 def DowloadAlbum(req,trash,album,old_album):
+    print(album['title'],'downloading to',album['path'])
     album['mediaItems']={}
+    skipped=0
     dest=Path(album['path'])
     dest.mkdir(parents=True,exist_ok=True)
     req_body=json.dumps({"albumId": album['id'],"pageSize": 100});
@@ -107,8 +116,9 @@ def DowloadAlbum(req,trash,album,old_album):
             (resp, content) = req.request("https://photoslibrary.googleapis.com/v1/mediaItems:search?pageToken="+nextpage,
                                            method="POST",body=req_body,headers=req_headers)
         if resp.status is not 200:
-            print('failed to load album',album['title'],resp.status,resp.reason)
-            return False
+            print(album['title'],'failed retrieve media list',resp.status,resp.reason)
+            res=False
+            break
         items = json.loads(content)
         # prepare next token
         if 'nextPageToken' in items:
@@ -117,19 +127,24 @@ def DowloadAlbum(req,trash,album,old_album):
             nextpage=None
         # download album media
         for media in items['mediaItems']:
-            if old_album is not None and media['id'] in old_album['mediaItems']:
-                res=CheckMedia(req,trash,album,media,old_album['mediaItems'][media['id']])
-            else:
-                res=DowloadMedia(req,trash,album,media)
-            if not res:
+            if old_album is not None and \
+               media['id'] in old_album['mediaItems'] and \
+               CheckMedia(trash,album,media,old_album['mediaItems'][media['id']]):
+                skipped+=1
+            elif not DowloadMedia(req,trash,album,media):
+                res=False
                 break
-        # keep old album data
         if not res:
-            if old_album is not None:
-                for media in old_album['mediaItems'].items():
-                    if media['id'] not in album['mediaItems']:
-                        album['mediaItems'][media['id']]=media
             break
+    # journal skipped files
+    if skipped>0:
+        print(album['title'],skipped,'up to date media files skipped')
+    # keep old album data
+    if not res:
+        if old_album is not None:
+            for media in old_album['mediaItems'].items():
+                if media['id'] not in album['mediaItems']:
+                    album['mediaItems'][media['id']]=media
     # set album download time and store its metadata
     album['downloadTime']=datetime.now(timezone.utc).timestamp()*1000
     with (Path(album['path'])/'album.json').open("w") as file:
@@ -150,7 +165,7 @@ def DowloadAlbum(req,trash,album,old_album):
             if moved:
                 print(album['title'],file.name,'excessive file moved to trash directory')
             else:
-                dest.unlink()
+                file.unlink()
                 print(album['title'],file.name,'excessive file removed')
     # try to rename media files to original filenames
     changed=False
@@ -173,14 +188,14 @@ def DowloadAlbum(req,trash,album,old_album):
     return True
 
 # check existing media
-def CheckMedia(req,trash,album,media,old):
+def CheckMedia(trash,album,media,old):
     # fake
     if old is None or 'filename' not in old:
-        return DowloadMedia(req,trash,album,media)
+        return False
     # check if exists
     oldpath=Path(album['path'],old['filename'])
     if not oldpath.exists():
-        return DowloadMedia(req,trash,album,media)
+        return False
     # something changed
     if not common.compare_dict(media,old,{'baseUrl','filename'}):
         # move outdated file to trash directory
@@ -193,13 +208,12 @@ def CheckMedia(req,trash,album,media,old):
             dest.unlink()
             print(album['title'],oldpath.name,'outdated file deleted')
         # download new media
-        return DowloadMedia(req,trash,album,media)
+        return False
     # set old filename
     media['filename']=old['filename']
     # store media data to album
     album['mediaItems'][media['id']]=media
     # ok
-    print(album['title'],media['filename'],'already exists')
     return True
 
 # dowload new media
