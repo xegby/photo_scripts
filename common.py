@@ -19,7 +19,7 @@ def move_file(srcpath,dstpath,allow_suffix=True):
         return dstpath
     # the same file, delete source
     if filecmp.cmp(srcpath,dstpath):
-        os.unlink(dstpath)
+        os.unlink(srcpath)
         return dstpath
     # check if directory
     dststat=os.stat(dstpath)
