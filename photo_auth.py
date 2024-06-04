@@ -25,7 +25,7 @@ parser.add_argument("--client_id", help="Google API client id to use instead of 
 parser.add_argument("--client_secret", help="Google API client secret to use instead of keys file")
 parser.add_argument('--redirect_proto', choices=['http', 'https'], default="http", help="Protocol to handle Google API athorization redirect")
 parser.add_argument("--redirect_host", default="localhost", help="Host to handle Google API athorization redirect")
-parser.add_argument("--redirect_port", choices=range(1,65535), default=8080, help="Port to handle Google API athorization redirect")
+parser.add_argument("--redirect_port", choices=range(1,65535), metavar="[1-65535]", default=8080, help="Port to handle Google API athorization redirect")
 parser.add_argument("tokens_file", nargs='?', default=None, help="Destination json file to store obtained tokens")
 args = parser.parse_args()
 
