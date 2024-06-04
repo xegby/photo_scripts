@@ -1,13 +1,12 @@
-import os,sys,stat
+import os,sys
 import argparse
 import json
 import time
+import http.server
+import socketserver
 from pathlib import Path
-from httplib2 import Http
 from datetime import datetime,timezone
-from oauth2client import file as oa2file
-from oauth2client import client as oa2client
-from oauth2client import tools as oa2tools
+from requests_oauthlib import OAuth2Session
 import common
 
 SCOPES = 'https://www.googleapis.com/auth/photoslibrary.readonly'
@@ -16,20 +15,124 @@ SCOPES = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 parser = argparse.ArgumentParser(description="Downloads Google Photos albums trying to prevent downloading known existing files",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument("--trashbin", default=None, help="Directory to store photos which are no longer in album")
-parser.add_argument("--key_file", default="key.json", help="Application keys file location")
-parser.add_argument("--creds_file", default="credentials.json", help="User credentials file location")
+parser.add_argument("--keys_file", help="Google API client keys json file location")
+parser.add_argument("--client_id", help="Google API client id to use instead of keys file")
+parser.add_argument("--client_secret", help="Google API client secret to use instead of keys file")
+parser.add_argument('--redirect_proto', choices=['http', 'https'], default="http", help="Protocol to handle Google API athorization redirect")
+parser.add_argument("--redirect_host", default="localhost", help="Host to handle Google API athorization redirect")
+parser.add_argument("--redirect_port", choices=range(1,65535), metavar="[1-65535]", default=8080, help="Port to handle Google API athorization redirect")
+parser.add_argument("--tokens_file", default="tokens.json", help="Authorized tokens json file location")
 parser.add_argument('--skip_new', action='store_true', help="Skip new Google Photos albums downloading")
+parser.add_argument('--headless', action='store_true', help="Run in headless mode without interactive authenfication")
 parser.add_argument("destination", help="Destination download directory")
 args = parser.parse_args()
 
-# prepare authorization request
-def Authorize(keys,credentials):
-    store = oa2file.Storage(credentials)
-    creds = store.get()
-    if not creds or creds.invalid:
-        flow = oa2client.flow_from_clientsecrets(filename=keys, scope=SCOPES)
-        creds = oa2tools.run_flow(flow, storage=store, flags=oa2tools.argparser.parse_args([]))
-    return(creds.authorize(Http()))
+# prepare authorized Google API request
+# based on examples:
+# https://github.com/requests/requests-oauthlib/blob/master/docs/examples/real_world_example_with_refresh.rst
+# https://requests-oauthlib.readthedocs.io/en/latest/examples/google.html
+# https://requests-oauthlib.readthedocs.io/en/latest/oauth2_workflow.html#third-recommended-define-automatic-token-refresh-and-update
+def Authorize(args)->OAuth2Session:
+    # prepare credentials
+    auth_url='https://accounts.google.com/o/oauth2/auth'
+    token_url='https://oauth2.googleapis.com/token'
+    refresh_url=token_url
+    creds={'client_id':'','client_secret':''}
+    scopes=['https://www.googleapis.com/auth/photoslibrary.readonly']
+
+    # read keys_file
+    if args.keys_file:
+        try:
+            with open(args.keys_file,mode='r') as file:
+                data=json.load(file);
+                if 'installed' in data:
+                    data=data['installed']
+                if 'auth_uri' in data:
+                    auth_url=data['auth_uri']
+                if 'token_uri' in data:
+                    token_url=data['token_uri']
+                if 'client_id' in data:
+                    creds['client_id']=data['client_id']
+                if 'client_secret' in data:
+                    creds['client_secret']=data['client_secret']
+        except:
+            print('specfied keys file',args.keys_file,'does not exist or invalid')
+
+    # get override credentials
+    if args.client_id:
+        creds['client_id']=args.client_id
+    if args.client_secret:
+        creds['client_secret']=args.client_secret
+
+    # check credentials
+    if not creds['client_id'] or not creds['client_secret']:
+        print('client id or secret are not specified')
+        return None
+
+    # try to refresh existing tokens
+    if args.tokens_file and Path(args.tokens_file).exists():
+        try:
+            with open(args.tokens_file,mode='r') as file:
+                tokens=json.load(file);
+                if not set(scopes).issubset(set(tokens['scope'])):
+                    raise Exception('invalid token scopes')
+                api=OAuth2Session(creds['client_id'],token=tokens,auto_refresh_kwargs=creds,auto_refresh_url=refresh_url,token_updater=SaveTokens)
+                tokens=api.refresh_token(refresh_url)
+                SaveTokens(tokens)
+                return api
+        except Exception as error:
+            print(error)
+            print('specfied tokens file',args.tokens_file,'is invalid or expired')
+
+    # cannot go further in headless mode
+    if args.headless:
+        print('can not proceed in headless mode without tokens')
+        return None
+
+    # build redirect url
+    redirect_url=args.redirect_proto+'://'+args.redirect_host+':'+str(args.redirect_port)
+
+    # auth redirection hadler
+    def HttpHandle(self):
+        nonlocal redirect_url
+        redirect_url=self.headers.get("Host")+self.path
+        self.close_connection=True
+        self.send_response(code=200)
+        self.end_headers()
+        self.wfile.write(bytes("Return to console", "utf-8"))
+        
+    # silent http logger
+    def HttpLogSilent(self, format, *args):
+        pass
+    
+    # redirect user to Google for authorization
+    api=OAuth2Session(creds['client_id'],scope=scopes,redirect_uri=redirect_url,auto_refresh_kwargs=creds,auto_refresh_url=refresh_url,token_updater=SaveTokens)
+    user_auth_url, state = api.authorization_url(auth_url,access_type="offline",prompt="select_account")
+    print('please go here and authorize:')
+    print(user_auth_url)
+    
+    # start listening for http redirection
+    handler=http.server.SimpleHTTPRequestHandler
+    handler.do_GET=HttpHandle
+    handler.log_message=HttpLogSilent
+    
+    with socketserver.TCPServer(("", args.redirect_port), handler) as httpd:
+        httpd.handle_request()
+    
+    # fetch the access token
+    if args.redirect_proto=='http':
+        os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+    tokens=api.fetch_token(token_url,client_secret=creds['client_secret'],authorization_response=redirect_url)
+    SaveTokens(tokens)
+    
+    # return api
+    return api
+
+# save tokens
+def SaveTokens(tokens):
+    if args.tokens_file:
+       with open(args.tokens_file,mode='w') as file:
+           json.dump(tokens,file)
 
 # load existing albums list
 def LoadAlbums(dest):
@@ -54,7 +157,7 @@ def LoadIgnore(dest):
     return ignore
 
 # dowload all albums
-def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
+def DowloadAlbums(api,trash,dest,old,ignore,skip_new):
     num_new=0
     num_local=0
     nextpage='0'
@@ -62,13 +165,13 @@ def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
     while nextpage is not None:
         # get album data
         if nextpage=='0':
-            (resp, content) = req.request("https://photoslibrary.googleapis.com/v1/albums?pageSize=50", method="GET")
+            resp = api.get("https://photoslibrary.googleapis.com/v1/albums?pageSize=50")
         else:
-            (resp, content) = req.request("https://photoslibrary.googleapis.com/v1/albums?pageSize=50&pageToken="+nextpage,method="GET")
-        if resp.status is not 200:
-            print('failed to load albums',resp.status,resp.reason)
+            resp = api.api("https://photoslibrary.googleapis.com/v1/albums?pageSize=50&pageToken="+nextpage)
+        if resp.status_code is not 200:
+            print('failed to load albums',resp.status_code,resp.reason)
             return
-        data = json.loads(content)
+        data = json.loads(resp.content)
         # remember nextpage
         if 'nextPageToken' in data:
             nextpage=data['nextPageToken']
@@ -92,12 +195,12 @@ def DowloadAlbums(req,trash,dest,old,ignore,skip_new):
             # download only allowed albums
             if album['title'] not in ignore and album['id'] not in ignore:
                 if album['id'] in old:
-                    DowloadAlbum(req,trash,album,old[album['id']])
+                    DowloadAlbum(api,trash,album,old[album['id']])
                 else:
-                    DowloadAlbum(req,trash,album,None)
+                    DowloadAlbum(api,trash,album,None)
 
 # dowload album
-def DowloadAlbum(req,trash,album,old_album):
+def DowloadAlbum(api,trash,album,old_album):
     print(album['title'],'downloading to',album['path'])
     album['mediaItems']={}
     skipped=0
@@ -110,16 +213,16 @@ def DowloadAlbum(req,trash,album,old_album):
     while nextpage is not None:
         # request album data
         if nextpage=='0':
-            (resp, content) = req.request("https://photoslibrary.googleapis.com/v1/mediaItems:search",
-                                           method="POST",body=req_body,headers=req_headers)
+            resp = api.post("https://photoslibrary.googleapis.com/v1/mediaItems:search",
+                            data=req_body,headers=req_headers)
         else:
-            (resp, content) = req.request("https://photoslibrary.googleapis.com/v1/mediaItems:search?pageToken="+nextpage,
-                                           method="POST",body=req_body,headers=req_headers)
-        if resp.status is not 200:
-            print(album['title'],'failed retrieve media list',resp.status,resp.reason)
+            resp = api.post("https://photoslibrary.googleapis.com/v1/mediaItems:search?pageToken="+nextpage,
+                            data=req_body,headers=req_headers)
+        if resp.status_code is not 200:
+            print(album['title'],'failed retrieve media list',resp.status_code,resp.reason)
             res=False
             break
-        items = json.loads(content)
+        items = json.loads(resp.content)
         # prepare next token
         if 'nextPageToken' in items:
             nextpage=items['nextPageToken']
@@ -131,7 +234,7 @@ def DowloadAlbum(req,trash,album,old_album):
                media['id'] in old_album['mediaItems'] and \
                CheckMedia(trash,album,media,old_album['mediaItems'][media['id']]):
                 skipped+=1
-            elif not DowloadMedia(req,trash,album,media):
+            elif not DowloadMedia(api,trash,album,media):
                 res=False
                 break
         if not res:
@@ -205,7 +308,7 @@ def CheckMedia(trash,album,media,old):
         if moved:
             print(album['title'],oldpath.name,'outdated file moved to trash directory')
         else:
-            dest.unlink()
+            oldpath.unlink()
             print(album['title'],oldpath.name,'outdated file deleted')
         # download new media
         return False
@@ -217,7 +320,7 @@ def CheckMedia(trash,album,media,old):
     return True
 
 # dowload new media
-def DowloadMedia(req,trash,album,media):
+def DowloadMedia(api,trash,album,media):
     # can we store it?
     if 'filename' not in media:
         return True
@@ -243,17 +346,17 @@ def DowloadMedia(req,trash,album,media):
         print(album['title'],tmp.name,'removed old temp file')
     # download media
     for t in [1,2,5,15,30,60,0]:
-        (resp, content) = req.request(media['baseUrl']+'=d', method="GET")
-        if resp.status is 200:
+        resp = api.get(media['baseUrl']+'=d')
+        if resp.status_code is 200:
             break
         if t<=0:
-            print(album['title'],tmp.name,'download failed, max attempts exceeded','[{status} {reason}]'.format(status=resp.status,reason=resp.reason))
+            print(album['title'],tmp.name,'download failed, max attempts exceeded','[{status} {reason}]'.format(status=resp.status_code,reason=resp.reason))
             return False
-        print(album['title'],tmp.name,'download failed, try again in',t,'seconds','[{status} {reason}]'.format(status=resp.status,reason=resp.reason))
+        print(album['title'],tmp.name,'download failed, try again in',t,'seconds','[{status} {reason}]'.format(status=resp.status_code,reason=resp.reason))
         time.sleep(t)
     # save media
     with tmp.open('wb') as f:
-        f.write(content)
+        f.write(resp.content)
     if not tmp.exists():
         print(album['title'],tmp.name,'failed to save file')
         return False
@@ -284,7 +387,13 @@ def NameClear(name,id):
     return name
 
 # main flow
-req=Authorize(Path(args.key_file),Path(args.creds_file))
-old_albums=LoadAlbums(Path(args.destination))
-ignore_albums=LoadIgnore(Path(args.destination))
-DowloadAlbums(req,Path(args.trashbin),Path(args.destination),old_albums,ignore_albums,args.skip_new)
+api=Authorize(args)
+if api is None:
+    print('Google Photo API authorization failed')
+else:
+    old_albums=LoadAlbums(Path(args.destination))
+    ignore_albums=LoadIgnore(Path(args.destination))
+    DowloadAlbums(api,
+                  Path(args.trashbin) if args.trashbin else None,
+                  Path(args.destination),
+                  old_albums,ignore_albums,args.skip_new)
