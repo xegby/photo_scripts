@@ -96,6 +96,6 @@ print(json.dumps(token))
 
 #store tokens
 if args.tokens_file:
-    with os.open(args.tokens_file) as f:
+    with open(args.tokens_file, mode='w') as f:
         json.dump(token,f)
     print('Saved to',args.tokens_file)
