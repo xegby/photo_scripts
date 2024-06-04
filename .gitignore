@@ -1,6 +1,6 @@
 # ignore secrets
 *keys.json
-*credentials.json
+*tokens.json
 /__pycache__
 /test
 /.vs
