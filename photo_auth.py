@@ -20,19 +20,20 @@ redirect_url=''
 # declare command line parameters
 parser = argparse.ArgumentParser(description="Authorizes Google API client to access user's data as a result provides tokens for external headless service",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--key_file", help="Google API client keys file location")
+parser.add_argument("--keys_file", help="Google API client keys json file location")
 parser.add_argument("--client_id", help="Google API client id to use instead of keys file")
 parser.add_argument("--client_secret", help="Google API client secret to use instead of keys file")
-parser.add_argument('--redirect_proto', choices=['http', 'https'], default="http", help="protocol to handle Google API athorization redirect")
-parser.add_argument("--redirect_host", default="localhost", help="host to handle Google API athorization redirect")
-parser.add_argument("--redirect_port", choices=range(1,65535), default=8080, help="port to handle Google API athorization redirect")
+parser.add_argument('--redirect_proto', choices=['http', 'https'], default="http", help="Protocol to handle Google API athorization redirect")
+parser.add_argument("--redirect_host", default="localhost", help="Host to handle Google API athorization redirect")
+parser.add_argument("--redirect_port", choices=range(1,65535), default=8080, help="Port to handle Google API athorization redirect")
+parser.add_argument("tokens_file", nargs='?', default=None, help="Destination json file to store obtained tokens")
 args = parser.parse_args()
 
 # loads authorization data 
-def LoadKeys(key_file: str):
+def LoadKeys(keys_file: str):
     global auth_url,token_url,client_id,client_secret
     try:
-        with open(key_file) as f:
+        with open(keys_file) as f:
             data = json.load(f)
             if 'installed' in data:
                 data=data['installed']
@@ -65,8 +66,8 @@ if args.client_id:
     client_id=args.client_id
 if args.client_secret:
     client_secret=args.client_secret
-if args.key_file and os.path.exists(args.key_file):
-    LoadKeys(args.key_file)
+if args.keys_file and os.path.exists(args.keys_file):
+    LoadKeys(args.keys_file)
 # build redirect url
 redirect_url=args.redirect_proto+'://'+args.redirect_host+':'+str(args.redirect_port)
 
@@ -89,5 +90,12 @@ if args.redirect_proto=='http':
     os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 token=google.fetch_token(token_url,client_secret=client_secret,authorization_response=redirect_url)
 
+# print tokens
 print('Use this token for your headless app authorization:')
 print(json.dumps(token))
+
+#store tokens
+if args.tokens_file:
+    with os.open(args.tokens_file) as f:
+        json.dump(token,f)
+    print('Saved to',args.tokens_file)
