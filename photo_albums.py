@@ -9,8 +9,6 @@ from datetime import datetime,timezone
 from requests_oauthlib import OAuth2Session
 import common
 
-SCOPES = 'https://www.googleapis.com/auth/photoslibrary.readonly'
-
 # declare command line parameters
 parser = argparse.ArgumentParser(description="Downloads Google Photos albums trying to prevent downloading known existing files",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
